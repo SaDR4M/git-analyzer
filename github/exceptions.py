@@ -1,0 +1,2 @@
+class EmptyCommitHistory(Exception) :
+    pass
