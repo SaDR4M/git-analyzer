@@ -2,7 +2,7 @@
 """
 Git Analyzer - PyQt6 GUI Application (Redesigned UI)
 A modern, professional, and minimal interface for a GitHub analysis tool.
-Features a multi-page layout and asynchronous operations to prevent UI freezing.
+Features a multi-page layout and asynchronous operations (via QThread) to prevent UI freezing.
 """
 
 import sys
@@ -61,7 +61,7 @@ class CodeTextEdit(QTextEdit):
         if source.hasText():
             self.insertPlainText(source.text())
 
-# --- Worker Thread for Asynchronous Operations ---
+# --- Worker Thread for Synchronous Operations ---
 class WorkerSignals(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(tuple)
@@ -448,27 +448,58 @@ class GitAnalyzerGUI(QMainWindow):
         if not token: return
         self.connect_btn.setEnabled(False)
         self.connect_btn.setText("Connecting...")
-        self.run_task_in_thread(self._task_connect, self._on_connect_result, self._on_task_error, token)
+        self.run_task_in_thread(self._task_connect_and_load_all, self._on_connect_and_load_all_result, self._on_task_error, token)
 
-    def _task_connect(self, token):
-        if self.github_profile.test_github_connection(token):
-            owner = self.github_profile._set_owner_name(token)
-            if owner:
-                return (token, owner, self.github_profile.avatar)
+    def _task_connect_and_load_all(self, token):
+        profile = GithubProfile()
+        repo_handler = GithubRepo()
+
+        connection_ok = profile.test_github_connection(token)
+        if not connection_ok:
+            raise ConnectionError("Token may be invalid or network issue.")
+        
+        owner = profile._set_owner_name(token)
+        if not owner:
             raise ValueError("Failed to retrieve owner name.")
-        raise ConnectionError("Token may be invalid.")
+        
+        repos = repo_handler.get_user_repositories(token, owner)
+        
+        avatar_data = None
+        if profile.avatar:
+            response = requests.get(profile.avatar, stream=True)
+            response.raise_for_status()
+            avatar_data = response.content
 
-    def _on_connect_result(self, result):
-        token, owner, avatar_url = result
-        self.token, self.owner = token, owner
+        return (token, owner, avatar_data, repos)
+
+    def _on_connect_and_load_all_result(self, result):
+        token, owner, avatar_data, repos = result
+        
+        self.token = token
+        self.owner = owner
+        
+        if avatar_data:
+            pixmap = QPixmap()
+            pixmap.loadFromData(avatar_data)
+            pixmap = pixmap.scaled(44, 44, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.avatar_label.setPixmap(pixmap)
+        self.username_label.setText(owner)
+        self.title_label.setVisible(False)
+        self.profile_widget.setVisible(True)
+
+        self.repo_combo.clear()
+        if repos:
+            self.repo_combo.addItem("Select a Repository...")
+            self.repo_combo.addItems(sorted(repos, key=str.lower))
+        else:
+            self.repo_combo.addItem("No repositories found.")
+
         self.update_connection_status("✅ Connected", True)
         self.analysis_workflow_group.setEnabled(True)
         self.write_commit_group.setEnabled(True)
         self.token_input.setEnabled(False)
         self.connect_btn.setVisible(False)
         self.disconnect_btn.setVisible(True)
-        self.update_header_with_profile(avatar_url, owner)
-        self.load_repositories()
         self.loading_label.setVisible(False)
         self.main_content_widget.setVisible(True)
 
@@ -491,43 +522,9 @@ class GitAnalyzerGUI(QMainWindow):
         self.connect_btn.setEnabled(False)
         self.reset_header()
 
-    def update_header_with_profile(self, avatar_url, owner):
-        if not avatar_url:
-            self.username_label.setText(owner)
-            self.title_label.setVisible(False)
-            self.profile_widget.setVisible(True)
-            return
-        self.run_task_in_thread(self._task_fetch_avatar, self._on_avatar_result, self._on_task_error, avatar_url, owner)
-
-    def _task_fetch_avatar(self, url, owner):
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        return (response.content, owner)
-
-    def _on_avatar_result(self, result):
-        image_data, owner = result
-        pixmap = QPixmap()
-        pixmap.loadFromData(image_data)
-        pixmap = pixmap.scaled(44, 44, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        self.avatar_label.setPixmap(pixmap)
-        self.username_label.setText(owner)
-        self.title_label.setVisible(False)
-        self.profile_widget.setVisible(True)
-    
     def reset_header(self):
         self.profile_widget.setVisible(False)
         self.title_label.setVisible(True)
-
-    def load_repositories(self):
-        self.run_task_in_thread(self.github_repo.get_user_repositories, self._on_load_repos_result, self._on_task_error, self.token, self.owner)
-
-    def _on_load_repos_result(self, repos):
-        self.repo_combo.clear()
-        if repos:
-            self.repo_combo.addItem("Select a Repository...")
-            self.repo_combo.addItems(sorted(repos, key=str.lower))
-        else:
-            self.repo_combo.addItem("No repositories found.")
 
     def on_repo_selected(self, index):
         self.commit_list_widget.clear()
