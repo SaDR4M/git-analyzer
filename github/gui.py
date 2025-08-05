@@ -2,13 +2,15 @@
 """
 Git Analyzer - PyQt6 GUI Application (Redesigned UI)
 A modern, professional, and minimal interface for a GitHub analysis tool.
-Features a multi-page layout and asynchronous operations (via QThread) to prevent UI freezing.
+Features a multi-page layout and asynchronous operations to prevent UI freezing.
 """
 
 import sys
 import requests
 import re
 import traceback
+import asyncio
+import inspect
 from typing import Optional, Tuple
 from dataclasses import dataclass
 from decouple import config
@@ -35,7 +37,14 @@ except ImportError:
             self.avatar = 'https://placehold.co/50x50/2dd4bf/1f2937?text=U'
             return "mock_user"
     class GithubRepo:
-        def get_user_repositories(self, token, owner): import time; time.sleep(1); return ["modern-ui-project", "api-backend", "learning-python"]
+        # --- UPDATED: Mock data now matches the new format ---
+        def get_user_repositories(self, token, owner): 
+            import time; time.sleep(1)
+            return [
+                {"mock_user/modern-ui-project": "https://..."},
+                {"mock_user/api-backend": "https://..."},
+                {"mock_user/learning-python": "https://..."}
+            ]
     @dataclass
     class GithubCommit:
         def get_repo_commits(self, token:str, owner:str, repo:str) -> list:
@@ -61,7 +70,7 @@ class CodeTextEdit(QTextEdit):
         if source.hasText():
             self.insertPlainText(source.text())
 
-# --- Worker Thread for Synchronous Operations ---
+# --- Worker Thread for Asynchronous Operations ---
 class WorkerSignals(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(tuple)
@@ -490,7 +499,10 @@ class GitAnalyzerGUI(QMainWindow):
         self.repo_combo.clear()
         if repos:
             self.repo_combo.addItem("Select a Repository...")
-            self.repo_combo.addItems(sorted(repos, key=str.lower))
+            # --- UPDATED: Logic to handle new repo list format ---
+            for repo_dict in repos:
+                for name, url in repo_dict.items():
+                    self.repo_combo.addItem(name, userData=url)
         else:
             self.repo_combo.addItem("No repositories found.")
 
