@@ -19,7 +19,7 @@ def generate_ai_response(prompt:str) -> str:
                 thinking_config=types.ThinkingConfig(thinking_budget=0) # Disables thinking
             ),
         )
-        ic(response.text)
+
         return response.text.strip()
     except Exception as e:
         # The SDK will raise specific errors, but a general catch-all is fine for now
@@ -44,11 +44,11 @@ def analyze_commit_list_with_ai(commit_messages: list[str]) -> str:
         Recognize that this is a list of separate commits, not one single message.
         Based on this list, provide a summary of the developer's habits, structured exactly as follows:
 
-        **Pros:**
+        **Strengths:**
         - (A bullet point listing a specific strength, e.g., "Good use of conventional commit types like 'feat' and 'fix'.")
         - (Another bullet point for a strength.)
 
-        **Cons:**
+        **Weaknesses:**
         - (A bullet point listing a specific weakness, e.g., "Some commit subjects are too vague, like 'docs'.")
         - (Another bullet point for a weakness.)
 
