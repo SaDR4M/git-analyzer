@@ -1,6 +1,9 @@
 import requests
 import logging
 import re
+import os
+from pathlib import Path
+from typing import Tuple
 # third party
 import asyncio
 import aiohttp
@@ -8,6 +11,7 @@ from decouple import config
 from icecream import ic
 from typing import Optional , Literal , Iterator , Tuple
 from dataclasses import dataclass
+from git import Repo
 # local
 from github.urls import (
     GITHUB_COMMIT_URL,
@@ -18,6 +22,7 @@ from github.exceptions import (
     EmptyCommitHistory
 )
 from github.utils import get_page_number
+
 
 logger = logging.getLogger(__name__)
     
@@ -37,7 +42,7 @@ class GithubProfile:
             )
             if response.status_code == 200 :
                 data = response.json()
-                ic(data)
+
                 owner_name = data.get("login" , None)
                 avatar = data.get("avatar_url" , None)
                 
@@ -105,12 +110,14 @@ class GithubRepo :
                 "per_page" : per_page_number
             }
         )
-        
-        repo_list = [
-            f"{owner}/{repo.get('name', '').lower()}"
-            for repo in response.json()
-        ] if response.status_code == 200 else []
-        
+        ic(response.json())
+        repo_list = []
+        for repo in response.json() :
+            if response.status_code == 200 :
+                repo_list.append(
+                    {f"{owner}/{repo.get('name', '').lower()}" : f"{repo.get('clone_url')}"}
+                )
+        ic(repo_list)
         logger.info(f"User got the repo list for the {owner} successfully")
         return repo_list
 
@@ -208,3 +215,81 @@ class GithubCommit:
         except (KeyError, ValueError):
             # TODO handle cases where page param is missing or not an integer.
             return None
+        
+@dataclass
+class GitRepo:
+    staged_files : list = None
+    staged_files_repo : list = None
+        
+    def _repo(self , path:str) -> list:
+        """
+        Clone repo to local if path exists we pass it to another function
+        to create a instance from local 
+        """
+        # create path for clone if it does not exists
+        if not path :
+            raise ValueError("Path must be valid")
+        
+        directory_exists = self._directory_exist(path)
+        if directory_exists :
+            repo = Repo(path)
+            self._stage_changes(repo)
+        else :           
+            return "Invalid directory path"
+        # get the staged files data
+        return self._stage_files(repo)
+        
+    def _directory_exist(self , path:str) -> bool:
+        """Check that path exists or not """
+
+        path_exists = os.path.exists(path=path)
+
+        if not path_exists :
+            return False
+        return True
+            
+    def _stage_files(self , repo:Repo) -> list :
+        """get the file name of staged changes with the change type"""
+        # staged diff
+        staged_changes = repo.index.diff(repo.head.commit)
+        
+        files = []
+        # get the file name and change type of the file
+        for diff in staged_changes :
+            ic(diff.a_blob)
+            files.append(
+                {
+                "file_name" : diff.a_path,
+                "change_type" : diff.change_type
+                }
+            )
+        self._stage_files = files
+        return files
+    
+    def _stage_changes(self , repo:Repo) -> list[Repo]:
+        """Get the stage changes to write commit base on them"""
+    
+        # get staged changes diff
+        staged_changes = repo.index.diff(repo.head.commit)
+        
+        # add the diff objects to a list to reuse it later
+        stage_files = []
+        for diff in staged_changes:
+            stage_files.append(diff)
+
+        self._staged_files_repo = stage_files
+
+
+    def decode_blob(self , repo:Repo) -> Tuple[str , str] :
+        """Decode a & b blobs to strings"""    
+        if repo.a_blob and not repo.b_blob :
+            raise ValueError("a_blob or b_blob must have value")
+        
+        decoded_b_blob = self.b_blob.data_stream.read().decode('utf-8')
+        decoded_a_blob = self.a_blob.data_stream.read().decode('utf-8')
+        
+        return decoded_a_blob , decoded_b_blob
+    
+
+    
+    
