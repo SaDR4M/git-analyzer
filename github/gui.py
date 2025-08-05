@@ -18,14 +18,15 @@ from decouple import config
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, QWidget,
     QLabel, QLineEdit, QPushButton, QComboBox, QGroupBox, QMessageBox, QStatusBar,
-    QFrame, QStyle, QListWidget, QTextEdit, QStackedWidget
+    QFrame, QStyle, QListWidget, QTextEdit, QStackedWidget, QFileDialog
 )
 from PyQt6.QtCore import Qt, QTimer, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon, QPixmap, QFontDatabase, QTextCursor
 
 # --- Import the actual logic handlers ---
 try:
-    from github.handler import GithubProfile, GithubRepo, GithubCommit
+    from github.handler import GithubProfile, GithubRepo, GithubCommit , GitRepo
+    # from github.local_handler import GitRepo # NEW: Import for local git operations
     from github.ai_analyzer import analyze_commit_list_with_ai, commit_best_practice, write_commit_message, write_commit_base_on_diff
 except ImportError:
     print("Warning: A handler was not found. Using mock classes for GUI demonstration.")
@@ -37,7 +38,6 @@ except ImportError:
             self.avatar = 'https://placehold.co/50x50/2dd4bf/1f2937?text=U'
             return "mock_user"
     class GithubRepo:
-        # --- UPDATED: Mock data now matches the new format ---
         def get_user_repositories(self, token, owner): 
             import time; time.sleep(1)
             return [
@@ -50,6 +50,20 @@ except ImportError:
         def get_repo_commits(self, token:str, owner:str, repo:str) -> list:
             import time; time.sleep(1.5)
             return ["feat: Add user authentication service", "fix: Resolve alignment issue on dashboard cards", "docs: Update API endpoint documentation"]
+    
+    # --- NEW: Mock for local GitRepo class ---
+    class GitRepo:
+        def _repo(self, path:str):
+            print(f"Mocking GitPython for path: {path}")
+            if not path:
+                raise ValueError("Path must be valid")
+            # Simulate finding staged files
+            return [
+                {"file_name": "src/main.py", "change_type": "M"},
+                {"file_name": "README.md", "change_type": "M"},
+                {"file_name": "new_feature.py", "change_type": "A"}
+            ]
+
     def analyze_commit_list_with_ai(commit_messages: list[str]) -> str:
         import time; time.sleep(2)
         return "**Overall Analysis:**\n- Good use of conventional commits."
@@ -104,6 +118,7 @@ class GitAnalyzerGUI(QMainWindow):
         self.owner = None
         self.github_profile = GithubProfile()
         self.github_repo = GithubRepo()
+        self.local_git_repo = GitRepo() # Instance for local operations
         self.thread = None
         self.worker = None
 
@@ -160,8 +175,12 @@ class GitAnalyzerGUI(QMainWindow):
         self.diff_page_btn = QPushButton("Generate from Diff")
         self.diff_page_btn.setObjectName("navButton")
         self.diff_page_btn.setCheckable(True)
+        self.local_page_btn = QPushButton("Generate from Local Changes")
+        self.local_page_btn.setObjectName("navButton")
+        self.local_page_btn.setCheckable(True)
         self.nav_button_layout.addWidget(self.analyze_page_btn)
         self.nav_button_layout.addWidget(self.diff_page_btn)
+        self.nav_button_layout.addWidget(self.local_page_btn)
         self.nav_button_layout.addStretch()
         self.header_layout.addLayout(self.nav_button_layout)
         main_content_layout.addLayout(self.header_layout)
@@ -173,9 +192,12 @@ class GitAnalyzerGUI(QMainWindow):
         self.stacked_widget.addWidget(self.analysis_page)
         self.diff_page = self.create_diff_page()
         self.stacked_widget.addWidget(self.diff_page)
+        self.local_page = self.create_local_page()
+        self.stacked_widget.addWidget(self.local_page)
         
         self.analyze_page_btn.clicked.connect(lambda: self.switch_page(0))
         self.diff_page_btn.clicked.connect(lambda: self.switch_page(1))
+        self.local_page_btn.clicked.connect(lambda: self.switch_page(2))
         
         self.main_layout.addWidget(self.main_content_widget)
         self.main_content_widget.setVisible(False)
@@ -313,6 +335,37 @@ class GitAnalyzerGUI(QMainWindow):
         layout.addWidget(diff_group)
         return page_widget
 
+    def create_local_page(self):
+        """Creates the widget for the 'Generate from Local Changes' page."""
+        page_widget = QWidget()
+        layout = QVBoxLayout(page_widget)
+        layout.setContentsMargins(0, 15, 0, 0)
+        layout.setSpacing(20)
+
+        local_group = QGroupBox("Generate Commit from Local Repository")
+        local_layout = QVBoxLayout(local_group)
+        local_layout.setContentsMargins(20, 30, 20, 20)
+        local_layout.setSpacing(15)
+
+        folder_select_layout = QHBoxLayout()
+        self.select_folder_btn = QPushButton("Select Project Folder")
+        self.select_folder_btn.clicked.connect(self.select_project_folder)
+        self.selected_folder_label = QLabel("No folder selected.")
+        self.selected_folder_label.setObjectName("folderLabel")
+        folder_select_layout.addWidget(self.select_folder_btn)
+        folder_select_layout.addWidget(self.selected_folder_label, 1)
+        
+        # --- NEW: List to show staged files ---
+        self.staged_files_list = QListWidget()
+        self.staged_files_list.setObjectName("stagedFilesList")
+
+        local_layout.addLayout(folder_select_layout)
+        local_layout.addWidget(QLabel("Staged Changes:"))
+        local_layout.addWidget(self.staged_files_list)
+        
+        layout.addWidget(local_group)
+        return page_widget
+
     def setup_styles(self):
         self.setStyleSheet("""
             QMainWindow { background-color: #111827; }
@@ -339,6 +392,7 @@ class GitAnalyzerGUI(QMainWindow):
             QLabel#statusSuccess { color: #2DD4BF; }
             QLabel#statusError { color: #F87171; }
             QLabel#loadingLabel { font-size: 20px; color: #4B5563; font-weight: 600; }
+            QLabel#folderLabel { color: #9CA3AF; font-style: italic; }
             QLineEdit, QComboBox, QTextEdit, QListWidget {
                 border: 1px solid #4B5563;
                 border-radius: 8px; 
@@ -408,6 +462,7 @@ class GitAnalyzerGUI(QMainWindow):
         self.stacked_widget.setCurrentIndex(index)
         self.analyze_page_btn.setChecked(index == 0)
         self.diff_page_btn.setChecked(index == 1)
+        self.local_page_btn.setChecked(index == 2)
 
     def run_task_in_thread(self, task_function, on_result, on_error, *args):
         if self.thread is not None and self.thread.isRunning():
@@ -499,7 +554,6 @@ class GitAnalyzerGUI(QMainWindow):
         self.repo_combo.clear()
         if repos:
             self.repo_combo.addItem("Select a Repository...")
-            # --- UPDATED: Logic to handle new repo list format ---
             for repo_dict in repos:
                 for name, url in repo_dict.items():
                     self.repo_combo.addItem(name, userData=url)
@@ -632,6 +686,29 @@ class GitAnalyzerGUI(QMainWindow):
         self.generated_diff_commit_text.setText(result)
         self.generate_from_diff_btn.setEnabled(True)
         self.generate_from_diff_btn.setText("Generate Commit Message from Diff")
+
+    def select_project_folder(self):
+        """Opens a dialog to select a local project folder and get staged files."""
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Project Folder")
+        if folder_path:
+            self.selected_folder_label.setText(folder_path)
+            self.run_task_in_thread(self.local_git_repo._repo, self._on_get_staged_files_result, self._on_task_error, folder_path)
+
+    def _on_get_staged_files_result(self, files):
+        """Populates the list widget with staged file information."""
+        self.staged_files_list.clear()
+        if isinstance(files, str): # Handle error message string
+            QMessageBox.warning(self, "Git Error", files)
+            self.staged_files_list.addItem(files)
+            return
+
+        if files:
+            for file_info in files:
+                # Format the display string: "M    src/main.py"
+                display_text = f"{file_info['change_type']}\t{file_info['file_name']}"
+                self.staged_files_list.addItem(display_text)
+        else:
+            self.staged_files_list.addItem("No staged changes found.")
 
     def _on_task_error(self, error_tuple):
         exctype, value, tb = error_tuple
