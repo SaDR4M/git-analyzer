@@ -11,7 +11,7 @@ import re
 import traceback
 import asyncio
 import inspect
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
 from decouple import config
 
@@ -20,13 +20,12 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QGroupBox, QMessageBox, QStatusBar,
     QFrame, QStyle, QListWidget, QTextEdit, QStackedWidget, QFileDialog
 )
-from PyQt6.QtCore import Qt, QTimer, QObject, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QTimer, QObject, QThread, pyqtSignal, pyqtSlot, QRunnable, QThreadPool
 from PyQt6.QtGui import QIcon, QPixmap, QFontDatabase, QTextCursor
 
 # --- Import the actual logic handlers ---
 try:
     from github.handler import GithubProfile, GithubRepo, GithubCommit , GitRepo
-    # from github.local_handler import GitRepo # NEW: Import for local git operations
     from github.ai_analyzer import analyze_commit_list_with_ai, commit_best_practice, write_commit_message, write_commit_base_on_diff
 except ImportError:
     print("Warning: A handler was not found. Using mock classes for GUI demonstration.")
@@ -51,18 +50,24 @@ except ImportError:
             import time; time.sleep(1.5)
             return ["feat: Add user authentication service", "fix: Resolve alignment issue on dashboard cards", "docs: Update API endpoint documentation"]
     
-    # --- NEW: Mock for local GitRepo class ---
     class GitRepo:
-        def _repo(self, path:str):
+        def get_git_status(self, path:str) -> Dict[str, List[Dict[str, str]]]:
+            """Mocks fetching both staged and unstaged files."""
             print(f"Mocking GitPython for path: {path}")
             if not path:
                 raise ValueError("Path must be valid")
-            # Simulate finding staged files
-            return [
-                {"file_name": "src/main.py", "change_type": "M"},
-                {"file_name": "README.md", "change_type": "M"},
-                {"file_name": "new_feature.py", "change_type": "A"}
-            ]
+            # Simulate finding staged and unstaged files
+            return {
+                "staged": [
+                    {"file_name": "src/main.py", "change_type": "M"},
+                    {"file_name": "README.md", "change_type": "M"}
+                ],
+                "unstaged": [
+                    {"file_name": "new_feature.py", "change_type": "A"},
+                    {"file_name": ".gitignore", "change_type": "M"},
+                    {"file_name": "tests/test_new_feature.py", "change_type": "A"}
+                ]
+            }
 
     def analyze_commit_list_with_ai(commit_messages: list[str]) -> str:
         import time; time.sleep(2)
@@ -90,7 +95,7 @@ class WorkerSignals(QObject):
     error = pyqtSignal(tuple)
     result = pyqtSignal(object)
 
-class Worker(QObject):
+class Worker(QRunnable):
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
         self.fn = fn
@@ -102,10 +107,9 @@ class Worker(QObject):
     def run(self):
         try:
             result = self.fn(*self.args, **self.kwargs)
+            self.signals.result.emit(result)
         except Exception as e:
             self.signals.error.emit((type(e), e, traceback.format_exc()))
-        else:
-            self.signals.result.emit(result)
         finally:
             self.signals.finished.emit()
 
@@ -118,9 +122,15 @@ class GitAnalyzerGUI(QMainWindow):
         self.owner = None
         self.github_profile = GithubProfile()
         self.github_repo = GithubRepo()
-        self.local_git_repo = GitRepo() # Instance for local operations
-        self.thread = None
-        self.worker = None
+        self.local_git_repo = GitRepo()
+        
+        # --- Attributes for local repo page ---
+        self.current_project_path = None
+        self.stage_selected_btn = None
+        self.stage_all_btn = None
+        self.unstaged_files_list = None
+        self.staged_files_list = None
+        self.refresh_local_btn = None
 
         self.init_ui()
         self.setup_styles()
@@ -336,32 +346,69 @@ class GitAnalyzerGUI(QMainWindow):
         return page_widget
 
     def create_local_page(self):
-        """Creates the widget for the 'Generate from Local Changes' page."""
+        """Creates the UI for the 'Generate from Local Changes' page with new features."""
         page_widget = QWidget()
         layout = QVBoxLayout(page_widget)
         layout.setContentsMargins(0, 15, 0, 0)
         layout.setSpacing(20)
 
-        local_group = QGroupBox("Generate Commit from Local Repository")
-        local_layout = QVBoxLayout(local_group)
-        local_layout.setContentsMargins(20, 30, 20, 20)
-        local_layout.setSpacing(15)
+        local_group = QGroupBox("Manage & Generate from Local Repository")
+        local_group_layout = QVBoxLayout(local_group)
+        local_group_layout.setContentsMargins(20, 30, 20, 20)
+        local_group_layout.setSpacing(15)
 
         folder_select_layout = QHBoxLayout()
         self.select_folder_btn = QPushButton("Select Project Folder")
         self.select_folder_btn.clicked.connect(self.select_project_folder)
+        
+        self.refresh_local_btn = QPushButton()
+        self.refresh_local_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self.refresh_local_btn.setToolTip("Refresh file status")
+        self.refresh_local_btn.setObjectName("iconButton")
+        self.refresh_local_btn.clicked.connect(self.refresh_local_repo_view)
+        self.refresh_local_btn.setEnabled(False)
+
         self.selected_folder_label = QLabel("No folder selected.")
         self.selected_folder_label.setObjectName("folderLabel")
         folder_select_layout.addWidget(self.select_folder_btn)
+        folder_select_layout.addWidget(self.refresh_local_btn)
         folder_select_layout.addWidget(self.selected_folder_label, 1)
-        
-        # --- NEW: List to show staged files ---
-        self.staged_files_list = QListWidget()
-        self.staged_files_list.setObjectName("stagedFilesList")
+        local_group_layout.addLayout(folder_select_layout)
 
-        local_layout.addLayout(folder_select_layout)
-        local_layout.addWidget(QLabel("Staged Changes:"))
-        local_layout.addWidget(self.staged_files_list)
+        file_management_layout = QGridLayout()
+        file_management_layout.setSpacing(15)
+
+        self.unstaged_files_list = QListWidget()
+        self.unstaged_files_list.setObjectName("filesList")
+        
+        self.staged_files_list = QListWidget()
+        self.staged_files_list.setObjectName("filesList")
+
+        staging_buttons_layout = QVBoxLayout()
+        staging_buttons_layout.setSpacing(10)
+        staging_buttons_layout.addStretch()
+        self.stage_selected_btn = QPushButton("Stage →")
+        self.stage_selected_btn.setObjectName("stageButton")
+        self.stage_selected_btn.setToolTip("Stage the selected file")
+        
+        self.stage_all_btn = QPushButton("Stage All →")
+        self.stage_all_btn.setObjectName("stageAllButton")
+        self.stage_all_btn.setToolTip("Stage all unstaged changes")
+        staging_buttons_layout.addWidget(self.stage_selected_btn)
+        staging_buttons_layout.addWidget(self.stage_all_btn)
+        staging_buttons_layout.addStretch()
+
+        file_management_layout.addWidget(QLabel("Unstaged Changes:"), 0, 0)
+        file_management_layout.addWidget(self.unstaged_files_list, 1, 0)
+        file_management_layout.addLayout(staging_buttons_layout, 1, 1)
+        file_management_layout.addWidget(QLabel("Staged Changes:"), 0, 2)
+        file_management_layout.addWidget(self.staged_files_list, 1, 2)
+        
+        file_management_layout.setColumnStretch(0, 5)
+        file_management_layout.setColumnStretch(1, 1)
+        file_management_layout.setColumnStretch(2, 5)
+
+        local_group_layout.addLayout(file_management_layout)
         
         layout.addWidget(local_group)
         return page_widget
@@ -392,7 +439,7 @@ class GitAnalyzerGUI(QMainWindow):
             QLabel#statusSuccess { color: #2DD4BF; }
             QLabel#statusError { color: #F87171; }
             QLabel#loadingLabel { font-size: 20px; color: #4B5563; font-weight: 600; }
-            QLabel#folderLabel { color: #9CA3AF; font-style: italic; }
+            QLabel#folderLabel { color: #9CA3AF; font-style: italic; padding-left: 10px; }
             QLineEdit, QComboBox, QTextEdit, QListWidget {
                 border: 1px solid #4B5563;
                 border-radius: 8px; 
@@ -440,6 +487,14 @@ class GitAnalyzerGUI(QMainWindow):
                 border: 1px solid #2DD4BF;
                 color: #2DD4BF;
             }
+            QPushButton#iconButton {
+                background-color: transparent;
+                border: 1px solid #4B5563;
+                padding: 8px; /* Make it squarer */
+            }
+            QPushButton#iconButton:hover {
+                background-color: #374151;
+            }
             QStatusBar {
                 background-color: #1F2937; border-top: 1px solid #374151;
             }
@@ -452,9 +507,24 @@ class GitAnalyzerGUI(QMainWindow):
                 background-color: #374151; color: #2DD4BF;
                 border: none;
             }
-            QListWidget { 
+            QListWidget, QListWidget#filesList { 
                 outline: 0px; 
                 border-radius: 8px;
+            }
+            QPushButton#stageButton {
+                background-color: #3B82F6; /* A nice blue */
+                color: #F9FAFB;
+            }
+            QPushButton#stageButton:hover {
+                background-color: #60A5FA;
+            }
+            QPushButton#stageAllButton {
+                background-color: transparent;
+                border: 1px solid #3B82F6;
+                color: #3B82F6;
+            }
+            QPushButton#stageAllButton:hover {
+                background-color: #374151;
             }
         """)
 
@@ -465,28 +535,10 @@ class GitAnalyzerGUI(QMainWindow):
         self.local_page_btn.setChecked(index == 2)
 
     def run_task_in_thread(self, task_function, on_result, on_error, *args):
-        if self.thread is not None and self.thread.isRunning():
-            QMessageBox.warning(self, "Busy", "An operation is already in progress. Please wait.")
-            return
-
-        self.thread = QThread()
-        self.worker = Worker(task_function, *args)
-        self.worker.moveToThread(self.thread)
-        
-        self.worker.signals.result.connect(on_result)
-        self.worker.signals.error.connect(on_error)
-        
-        self.worker.signals.finished.connect(self.thread.quit)
-        self.worker.signals.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.thread.finished.connect(self._on_thread_finished)
-        
-        self.thread.started.connect(self.worker.run)
-        self.thread.start()
-
-    def _on_thread_finished(self):
-        self.thread = None
-        self.worker = None
+        worker = Worker(task_function, *args)
+        worker.signals.result.connect(on_result)
+        worker.signals.error.connect(on_error)
+        QThreadPool.globalInstance().start(worker)
 
     def initialize_app(self):
         token = config("GITHUB_ACCESS_TOKEN", default=None)
@@ -688,27 +740,43 @@ class GitAnalyzerGUI(QMainWindow):
         self.generate_from_diff_btn.setText("Generate Commit Message from Diff")
 
     def select_project_folder(self):
-        """Opens a dialog to select a local project folder and get staged files."""
+        """Opens a dialog to select a local project folder."""
         folder_path = QFileDialog.getExistingDirectory(self, "Select Project Folder")
         if folder_path:
+            self.current_project_path = folder_path
             self.selected_folder_label.setText(folder_path)
-            self.run_task_in_thread(self.local_git_repo._repo, self._on_get_staged_files_result, self._on_task_error, folder_path)
+            self.refresh_local_btn.setEnabled(True)
+            self.refresh_local_repo_view()
 
-    def _on_get_staged_files_result(self, files):
-        """Populates the list widget with staged file information."""
-        self.staged_files_list.clear()
-        if isinstance(files, str): # Handle error message string
-            QMessageBox.warning(self, "Git Error", files)
-            self.staged_files_list.addItem(files)
+    def refresh_local_repo_view(self):
+        """Fetches the latest git status for the selected folder."""
+        if not self.current_project_path:
             return
+        self.status_bar.showMessage("Refreshing local changes...", 2000)
+        self.refresh_local_btn.setEnabled(False)
+        self.run_task_in_thread(self.local_git_repo.get_git_status, self._on_get_local_changes_result, self._on_task_error, self.current_project_path)
 
-        if files:
-            for file_info in files:
-                # Format the display string: "M    src/main.py"
+    def _on_get_local_changes_result(self, result: Dict[str, list]):
+        """Populates the unstaged and staged file lists."""
+        self.refresh_local_btn.setEnabled(True)
+        self.staged_files_list.clear()
+        self.unstaged_files_list.clear()
+
+        staged_files = result.get("staged", [])
+        if staged_files:
+            for file_info in staged_files:
                 display_text = f"{file_info['change_type']}\t{file_info['file_name']}"
                 self.staged_files_list.addItem(display_text)
         else:
-            self.staged_files_list.addItem("No staged changes found.")
+            self.staged_files_list.addItem("No staged changes.")
+
+        unstaged_files = result.get("unstaged", [])
+        if unstaged_files:
+            for file_info in unstaged_files:
+                display_text = f"{file_info['change_type']}\t{file_info['file_name']}"
+                self.unstaged_files_list.addItem(display_text)
+        else:
+            self.unstaged_files_list.addItem("No unstaged changes.")
 
     def _on_task_error(self, error_tuple):
         exctype, value, tb = error_tuple
@@ -725,14 +793,19 @@ class GitAnalyzerGUI(QMainWindow):
         self.generate_commit_btn.setText("Generate Commit Message")
         self.generate_from_diff_btn.setEnabled(True)
         self.generate_from_diff_btn.setText("Generate Commit Message from Diff")
+        if self.refresh_local_btn:
+            self.refresh_local_btn.setEnabled(True)
 
     def closeEvent(self, event):
         """Ensure background threads are stopped before closing."""
-        if self.thread and self.thread.isRunning():
-            print("Waiting for background thread to finish...")
-            self.thread.quit()
-            if not self.thread.wait(5000): # Wait for 5 seconds
-                print("Thread did not finish in time. Forcing termination.")
-                self.thread.terminate()
-                self.thread.wait()
+        QThreadPool.globalInstance().waitForDone()
         event.accept()
+
+if __name__ == '__main__':
+    if not config("GITHUB_ACCESS_TOKEN", default=None):
+        print("INFO: .env file with GITHUB_ACCESS_TOKEN not found. Starting with manual input.")
+
+    app = QApplication(sys.argv)
+    window = GitAnalyzerGUI()
+    window.show()
+    sys.exit(app.exec())
