@@ -6,29 +6,37 @@ Features a multi-page layout and asynchronous operations to prevent UI freezing.
 """
 
 import sys
+import os
 import requests
 import re
 import traceback
-import asyncio
-import inspect
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
 from decouple import config
+
+# --- GitPython Import ---
+# This is now a hard dependency for the local features.
+try:
+    from git import Repo, InvalidGitRepositoryError
+except ImportError:
+    print("FATAL ERROR: GitPython is not installed. Please run 'pip install GitPython'")
+    sys.exit(1)
+
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, QWidget,
     QLabel, QLineEdit, QPushButton, QComboBox, QGroupBox, QMessageBox, QStatusBar,
     QFrame, QStyle, QListWidget, QTextEdit, QStackedWidget, QFileDialog
 )
-from PyQt6.QtCore import Qt, QTimer, QObject, QThread, pyqtSignal, pyqtSlot, QRunnable, QThreadPool
+from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, pyqtSlot, QRunnable, QThreadPool
 from PyQt6.QtGui import QIcon, QPixmap, QFontDatabase, QTextCursor
 
 # --- Import the actual logic handlers ---
 try:
-    from github.handler import GithubProfile, GithubRepo, GithubCommit , GitRepo
-    from github.ai_analyzer import analyze_commit_list_with_ai, commit_best_practice, write_commit_message, write_commit_base_on_diff
+    from github.handler import GithubProfile, GithubRepo, GithubCommit
+    from github.ai_analyzer import analyze_commit_list_with_ai, commit_best_practice, write_commit_message, write_commit_base_on_diff, write_commits_for_staged_changes
 except ImportError:
-    print("Warning: A handler was not found. Using mock classes for GUI demonstration.")
+    print("Warning: A remote handler was not found. Using mock classes for GUI demonstration.")
     class GithubProfile:
         def __init__(self):
             self.avatar = None
@@ -50,25 +58,6 @@ except ImportError:
             import time; time.sleep(1.5)
             return ["feat: Add user authentication service", "fix: Resolve alignment issue on dashboard cards", "docs: Update API endpoint documentation"]
     
-    class GitRepo:
-        def get_git_status(self, path:str) -> Dict[str, List[Dict[str, str]]]:
-            """Mocks fetching both staged and unstaged files."""
-            print(f"Mocking GitPython for path: {path}")
-            if not path:
-                raise ValueError("Path must be valid")
-            # Simulate finding staged and unstaged files
-            return {
-                "staged": [
-                    {"file_name": "src/main.py", "change_type": "M"},
-                    {"file_name": "README.md", "change_type": "M"}
-                ],
-                "unstaged": [
-                    {"file_name": "new_feature.py", "change_type": "A"},
-                    {"file_name": ".gitignore", "change_type": "M"},
-                    {"file_name": "tests/test_new_feature.py", "change_type": "A"}
-                ]
-            }
-
     def analyze_commit_list_with_ai(commit_messages: list[str]) -> str:
         import time; time.sleep(2)
         return "**Overall Analysis:**\n- Good use of conventional commits."
@@ -81,6 +70,90 @@ except ImportError:
     def write_commit_base_on_diff(old_code: str, new_code: str) -> str:
         import time; time.sleep(2)
         return "refactor: Simplify logic in main function\n\n- Replaced complex loop with list comprehension for clarity.\n- Removed redundant variable assignments."
+    def write_commits_for_staged_changes(staged_changes:dict) -> str:
+        import time; time.sleep(2)
+        num_files = len(staged_changes)
+        return f"feat: Update {num_files} files\n\n- Refactored core logic for performance.\n- Updated documentation and tests."
+
+
+# --- Real GitRepo Class ---
+class GitRepo:
+    """Handles all local Git repository interactions."""
+    def __init__(self):
+        self.staged_diffs = []
+
+    def _decode_blob(self, diff):
+        """Safely decodes blob content to string."""
+        try:
+            old_content = diff.a_blob.data_stream.read().decode('utf-8')
+        except (AttributeError, UnicodeDecodeError):
+            old_content = "" # File is new or is binary
+        try:
+            new_content = diff.b_blob.data_stream.read().decode('utf-8')
+        except (AttributeError, UnicodeDecodeError):
+            new_content = "" # File was deleted or is binary
+        return old_content, new_content
+
+    def get_status(self, path: str) -> Dict[str, List[Dict[str, str]]]:
+        """
+        Gets the status of the local repository, separating staged and unstaged files.
+        Also caches the staged diff objects for later use.
+        """
+        if not os.path.isdir(path):
+            raise ValueError("Invalid directory path provided.")
+        
+        try:
+            repo = Repo(path, search_parent_directories=True)
+        except InvalidGitRepositoryError:
+            raise InvalidGitRepositoryError("The selected folder is not a valid Git repository.")
+
+        self.staged_diffs = list(repo.index.diff(repo.head.commit))
+        
+        staged_files = []
+        for diff in self.staged_diffs:
+            staged_files.append({"file_name": diff.a_path, "change_type": diff.change_type})
+
+        unstaged_files = []
+        for diff in repo.index.diff(None):
+            unstaged_files.append({"file_name": diff.a_path, "change_type": diff.change_type})
+        
+        untracked = repo.untracked_files
+        for file_path in untracked:
+            if not any(f['file_name'] == file_path for f in unstaged_files):
+                unstaged_files.append({"file_name": file_path, "change_type": "A"})
+
+        return {"staged": staged_files, "unstaged": unstaged_files}
+
+    def combine_all_blobs(self) -> dict:
+        """Combine all diffs to analyze the staged changes commits"""
+        combined_diffs = {}
+        for diff in self.staged_diffs:
+            file_path = diff.b_path or diff.a_path
+            if not file_path:
+                continue # Should not happen, but good practice
+            
+            old_content, new_content = self._decode_blob(diff)
+            combined_diffs[file_path] = {"old": old_content, "new": new_content}
+    
+        return combined_diffs
+
+    def stage_files(self, path: str, files_to_stage: List[str]):
+        """Stages a list of files in the given repository."""
+        repo = Repo(path, search_parent_directories=True)
+        repo.index.add(files_to_stage)
+        return True
+
+    def unstage_files(self, path: str, files_to_unstage: List[str]):
+        """Unstages a list of files in the given repository."""
+        repo = Repo(path, search_parent_directories=True)
+        repo.index.reset(paths=files_to_unstage)
+        return True
+        
+    def unstage_all_files(self, path: str):
+        """Unstages all files in the repository."""
+        repo = Repo(path, search_parent_directories=True)
+        repo.index.reset()
+        return True
 
 # --- Custom Widget for Plain Text Pasting ---
 class CodeTextEdit(QTextEdit):
@@ -124,13 +197,16 @@ class GitAnalyzerGUI(QMainWindow):
         self.github_repo = GithubRepo()
         self.local_git_repo = GitRepo()
         
-        # --- Attributes for local repo page ---
         self.current_project_path = None
         self.stage_selected_btn = None
         self.stage_all_btn = None
+        self.unstage_selected_btn = None
+        self.unstage_all_btn = None
         self.unstaged_files_list = None
         self.staged_files_list = None
         self.refresh_local_btn = None
+        self.generate_from_staged_btn = None
+        self.generated_staged_commit_text = None
 
         self.init_ui()
         self.setup_styles()
@@ -157,7 +233,6 @@ class GitAnalyzerGUI(QMainWindow):
         main_content_layout.setContentsMargins(25, 20, 25, 10)
         main_content_layout.setSpacing(20)
         
-        # Header
         self.header_layout = QHBoxLayout()
         self.title_label = QLabel("Git Analyzer")
         self.title_label.setObjectName("headerTitle")
@@ -346,7 +421,6 @@ class GitAnalyzerGUI(QMainWindow):
         return page_widget
 
     def create_local_page(self):
-        """Creates the UI for the 'Generate from Local Changes' page with new features."""
         page_widget = QWidget()
         layout = QVBoxLayout(page_widget)
         layout.setContentsMargins(0, 15, 0, 0)
@@ -387,15 +461,32 @@ class GitAnalyzerGUI(QMainWindow):
         staging_buttons_layout = QVBoxLayout()
         staging_buttons_layout.setSpacing(10)
         staging_buttons_layout.addStretch()
+        
         self.stage_selected_btn = QPushButton("Stage →")
         self.stage_selected_btn.setObjectName("stageButton")
         self.stage_selected_btn.setToolTip("Stage the selected file")
+        self.stage_selected_btn.clicked.connect(self.handle_stage_selected)
         
         self.stage_all_btn = QPushButton("Stage All →")
         self.stage_all_btn.setObjectName("stageAllButton")
         self.stage_all_btn.setToolTip("Stage all unstaged changes")
+        self.stage_all_btn.clicked.connect(self.handle_stage_all)
+        
+        self.unstage_selected_btn = QPushButton("← Unstage")
+        self.unstage_selected_btn.setObjectName("unstageButton")
+        self.unstage_selected_btn.setToolTip("Unstage the selected file")
+        self.unstage_selected_btn.clicked.connect(self.handle_unstage_selected)
+
+        self.unstage_all_btn = QPushButton("← Unstage All")
+        self.unstage_all_btn.setObjectName("unstageAllButton")
+        self.unstage_all_btn.setToolTip("Unstage all staged changes")
+        self.unstage_all_btn.clicked.connect(self.handle_unstage_all)
+
         staging_buttons_layout.addWidget(self.stage_selected_btn)
         staging_buttons_layout.addWidget(self.stage_all_btn)
+        staging_buttons_layout.addSpacing(40)
+        staging_buttons_layout.addWidget(self.unstage_selected_btn)
+        staging_buttons_layout.addWidget(self.unstage_all_btn)
         staging_buttons_layout.addStretch()
 
         file_management_layout.addWidget(QLabel("Unstaged Changes:"), 0, 0)
@@ -410,6 +501,25 @@ class GitAnalyzerGUI(QMainWindow):
 
         local_group_layout.addLayout(file_management_layout)
         
+        # --- AI Commit Generation for Staged Files ---
+        staged_commit_group = QGroupBox("AI Commit Generation for Staged Changes")
+        staged_commit_layout = QVBoxLayout(staged_commit_group)
+        staged_commit_layout.setContentsMargins(20, 30, 20, 20)
+        staged_commit_layout.setSpacing(15)
+
+        self.generated_staged_commit_text = QTextEdit()
+        self.generated_staged_commit_text.setReadOnly(True)
+        self.generated_staged_commit_text.setPlaceholderText("AI-generated commit message for all staged changes will appear here...")
+        
+        self.generate_from_staged_btn = QPushButton("Generate Commit from Staged")
+        self.generate_from_staged_btn.setObjectName("generate_from_diff_btn") # Re-use style
+        self.generate_from_staged_btn.clicked.connect(self.run_staged_changes_analysis)
+
+        staged_commit_layout.addWidget(self.generated_staged_commit_text)
+        staged_commit_layout.addWidget(self.generate_from_staged_btn)
+        
+        local_group_layout.addWidget(staged_commit_group)
+
         layout.addWidget(local_group)
         return page_widget
 
@@ -490,7 +600,7 @@ class GitAnalyzerGUI(QMainWindow):
             QPushButton#iconButton {
                 background-color: transparent;
                 border: 1px solid #4B5563;
-                padding: 8px; /* Make it squarer */
+                padding: 8px;
             }
             QPushButton#iconButton:hover {
                 background-color: #374151;
@@ -512,7 +622,7 @@ class GitAnalyzerGUI(QMainWindow):
                 border-radius: 8px;
             }
             QPushButton#stageButton {
-                background-color: #3B82F6; /* A nice blue */
+                background-color: #3B82F6;
                 color: #F9FAFB;
             }
             QPushButton#stageButton:hover {
@@ -526,6 +636,21 @@ class GitAnalyzerGUI(QMainWindow):
             QPushButton#stageAllButton:hover {
                 background-color: #374151;
             }
+            QPushButton#unstageButton {
+                background-color: #F43F5E; /* Rose color */
+                color: #F9FAFB;
+            }
+            QPushButton#unstageButton:hover {
+                background-color: #FB7185;
+            }
+            QPushButton#unstageAllButton {
+                background-color: transparent;
+                border: 1px solid #F43F5E;
+                color: #F43F5E;
+            }
+            QPushButton#unstageAllButton:hover {
+                background-color: #374151;
+            }
         """)
 
     def switch_page(self, index):
@@ -534,8 +659,8 @@ class GitAnalyzerGUI(QMainWindow):
         self.diff_page_btn.setChecked(index == 1)
         self.local_page_btn.setChecked(index == 2)
 
-    def run_task_in_thread(self, task_function, on_result, on_error, *args):
-        worker = Worker(task_function, *args)
+    def run_task_in_thread(self, task_function, on_result, on_error, *args, **kwargs):
+        worker = Worker(task_function, *args, **kwargs)
         worker.signals.result.connect(on_result)
         worker.signals.error.connect(on_error)
         QThreadPool.globalInstance().start(worker)
@@ -564,36 +689,29 @@ class GitAnalyzerGUI(QMainWindow):
         if not token: return
         self.connect_btn.setEnabled(False)
         self.connect_btn.setText("Connecting...")
-        self.run_task_in_thread(self._task_connect_and_load_all, self._on_connect_and_load_all_result, self._on_task_error, token)
+        self.run_task_in_thread(self._task_connect_and_load_all, self._on_connect_and_load_all_result, self._on_task_error, token=token)
 
     def _task_connect_and_load_all(self, token):
         profile = GithubProfile()
         repo_handler = GithubRepo()
-
         connection_ok = profile.test_github_connection(token)
         if not connection_ok:
             raise ConnectionError("Token may be invalid or network issue.")
-        
         owner = profile._set_owner_name(token)
         if not owner:
             raise ValueError("Failed to retrieve owner name.")
-        
         repos = repo_handler.get_user_repositories(token, owner)
-        
         avatar_data = None
         if profile.avatar:
             response = requests.get(profile.avatar, stream=True)
             response.raise_for_status()
             avatar_data = response.content
-
         return (token, owner, avatar_data, repos)
 
     def _on_connect_and_load_all_result(self, result):
         token, owner, avatar_data, repos = result
-        
         self.token = token
         self.owner = owner
-        
         if avatar_data:
             pixmap = QPixmap()
             pixmap.loadFromData(avatar_data)
@@ -602,7 +720,6 @@ class GitAnalyzerGUI(QMainWindow):
         self.username_label.setText(owner)
         self.title_label.setVisible(False)
         self.profile_widget.setVisible(True)
-
         self.repo_combo.clear()
         if repos:
             self.repo_combo.addItem("Select a Repository...")
@@ -611,7 +728,6 @@ class GitAnalyzerGUI(QMainWindow):
                     self.repo_combo.addItem(name, userData=url)
         else:
             self.repo_combo.addItem("No repositories found.")
-
         self.update_connection_status("✅ Connected", True)
         self.analysis_workflow_group.setEnabled(True)
         self.write_commit_group.setEnabled(True)
@@ -659,7 +775,7 @@ class GitAnalyzerGUI(QMainWindow):
         repo = self.repo_combo.currentText()
         if not repo or repo == "Select a Repository...": return
         self.commit_list_widget.clear()
-        self.run_task_in_thread(self._task_load_commits, self._on_load_commits_result, self._on_task_error, repo)
+        self.run_task_in_thread(self._task_load_commits, self._on_load_commits_result, self._on_task_error, repo=repo)
 
     def _task_load_commits(self, repo):
         commit_handler = GithubCommit()
@@ -679,7 +795,7 @@ class GitAnalyzerGUI(QMainWindow):
         if not items or "No commits found" in items[0]: return
         self.analyze_commits_btn.setEnabled(False)
         self.analyze_commits_btn.setText("Analyzing...")
-        self.run_task_in_thread(analyze_commit_list_with_ai, self._on_ai_analysis_result, self._on_task_error, items)
+        self.run_task_in_thread(analyze_commit_list_with_ai, self._on_ai_analysis_result, self._on_task_error, commit_messages=items)
 
     def _on_ai_analysis_result(self, result):
         self.analysis_results_text.setText(result)
@@ -692,7 +808,7 @@ class GitAnalyzerGUI(QMainWindow):
         message = selected[0].text().split('/')[-1].strip()
         self.best_practice_btn.setEnabled(False)
         self.best_practice_btn.setText("Improving...")
-        self.run_task_in_thread(commit_best_practice, lambda result: self._on_single_analysis_result(result, message), self._on_task_error, message)
+        self.run_task_in_thread(commit_best_practice, lambda result: self._on_single_analysis_result(result, message), self._on_task_error, commit_message=message)
 
     def _on_single_analysis_result(self, result, original_message):
         formatted_original = original_message.replace('\n', '<br>')
@@ -706,7 +822,7 @@ class GitAnalyzerGUI(QMainWindow):
         if not desc: return
         self.generate_commit_btn.setEnabled(False)
         self.generate_commit_btn.setText("Generating...")
-        self.run_task_in_thread(write_commit_message, self._on_write_commit_result, self._on_task_error, desc)
+        self.run_task_in_thread(write_commit_message, self._on_write_commit_result, self._on_task_error, message=desc)
 
     def _on_write_commit_result(self, result):
         self.generated_commit_text.setText(result)
@@ -732,7 +848,7 @@ class GitAnalyzerGUI(QMainWindow):
             return
         self.generate_from_diff_btn.setEnabled(False)
         self.generate_from_diff_btn.setText("Generating...")
-        self.run_task_in_thread(write_commit_base_on_diff, self._on_diff_analysis_result, self._on_task_error, old_code, new_code)
+        self.run_task_in_thread(write_commit_base_on_diff, self._on_diff_analysis_result, self._on_task_error, old_code=old_code, new_code=new_code)
 
     def _on_diff_analysis_result(self, result):
         self.generated_diff_commit_text.setText(result)
@@ -740,7 +856,6 @@ class GitAnalyzerGUI(QMainWindow):
         self.generate_from_diff_btn.setText("Generate Commit Message from Diff")
 
     def select_project_folder(self):
-        """Opens a dialog to select a local project folder."""
         folder_path = QFileDialog.getExistingDirectory(self, "Select Project Folder")
         if folder_path:
             self.current_project_path = folder_path
@@ -749,15 +864,105 @@ class GitAnalyzerGUI(QMainWindow):
             self.refresh_local_repo_view()
 
     def refresh_local_repo_view(self):
-        """Fetches the latest git status for the selected folder."""
         if not self.current_project_path:
             return
         self.status_bar.showMessage("Refreshing local changes...", 2000)
         self.refresh_local_btn.setEnabled(False)
-        self.run_task_in_thread(self.local_git_repo.get_git_status, self._on_get_local_changes_result, self._on_task_error, self.current_project_path)
+        self.run_task_in_thread(self.local_git_repo.get_status, self._on_get_local_changes_result, self._on_task_error, path=self.current_project_path)
+
+    def handle_stage_selected(self):
+        selected_items = self.unstaged_files_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "No Selection", "Please select a file to stage.")
+            return
+        file_to_stage = selected_items[0].text().split('\t')[-1]
+        self.run_stage_task([file_to_stage])
+
+    def handle_stage_all(self):
+        all_files = []
+        for i in range(self.unstaged_files_list.count()):
+            item_text = self.unstaged_files_list.item(i).text()
+            if "No unstaged changes" not in item_text:
+                 all_files.append(item_text.split('\t')[-1])
+        if not all_files:
+            QMessageBox.information(self, "No Changes", "There are no unstaged files to stage.")
+            return
+        self.run_stage_task(all_files)
+
+    def run_stage_task(self, files: List[str]):
+        self.status_bar.showMessage(f"Staging {len(files)} file(s)...", 3000)
+        self.run_task_in_thread(
+            self.local_git_repo.stage_files,
+            self._on_stage_complete,
+            self._on_task_error,
+            path=self.current_project_path,
+            files_to_stage=files
+        )
+
+    def _on_stage_complete(self, result):
+        self.status_bar.showMessage("Staging successful!", 2000)
+        self.refresh_local_repo_view()
+
+    def handle_unstage_selected(self):
+        selected_items = self.staged_files_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "No Selection", "Please select a file to unstage.")
+            return
+        file_to_unstage = selected_items[0].text().split('\t')[-1]
+        self.run_unstage_task([file_to_unstage])
+
+    def handle_unstage_all(self):
+        if self.staged_files_list.count() == 0 or "No staged changes" in self.staged_files_list.item(0).text():
+            QMessageBox.information(self, "No Changes", "There are no staged files to unstage.")
+            return
+        
+        self.status_bar.showMessage("Unstaging all files...", 3000)
+        self.run_task_in_thread(
+            self.local_git_repo.unstage_all_files,
+            self._on_unstage_complete,
+            self._on_task_error,
+            path=self.current_project_path
+        )
+
+    def run_unstage_task(self, files: List[str]):
+        self.status_bar.showMessage(f"Unstaging {len(files)} file(s)...", 3000)
+        self.run_task_in_thread(
+            self.local_git_repo.unstage_files,
+            self._on_unstage_complete,
+            self._on_task_error,
+            path=self.current_project_path,
+            files_to_unstage=files
+        )
+
+    def _on_unstage_complete(self, result):
+        self.status_bar.showMessage("Unstaging successful!", 2000)
+        self.refresh_local_repo_view()
+
+    def run_staged_changes_analysis(self):
+        """Handles the full workflow for generating a commit from staged files."""
+        if not self.local_git_repo.staged_diffs:
+            QMessageBox.information(self, "No Staged Changes", "There are no changes in the staging area to analyze.")
+            return
+        
+        self.generate_from_staged_btn.setEnabled(False)
+        self.generate_from_staged_btn.setText("Analyzing...")
+        self.run_task_in_thread(self._task_generate_from_staged, self._on_staged_analysis_result, self._on_task_error)
+
+    def _task_generate_from_staged(self):
+        """Background task to combine blobs and call the AI."""
+        combined_blobs = self.local_git_repo.combine_all_blobs()
+        if not combined_blobs:
+            raise ValueError("Could not extract changes from staged files.")
+        
+        commit_message = write_commits_for_staged_changes(combined_blobs)
+        return commit_message
+
+    def _on_staged_analysis_result(self, result):
+        self.generated_staged_commit_text.setText(result)
+        self.generate_from_staged_btn.setEnabled(True)
+        self.generate_from_staged_btn.setText("Generate Commit from Staged")
 
     def _on_get_local_changes_result(self, result: Dict[str, list]):
-        """Populates the unstaged and staged file lists."""
         self.refresh_local_btn.setEnabled(True)
         self.staged_files_list.clear()
         self.unstaged_files_list.clear()
@@ -795,9 +1000,11 @@ class GitAnalyzerGUI(QMainWindow):
         self.generate_from_diff_btn.setText("Generate Commit Message from Diff")
         if self.refresh_local_btn:
             self.refresh_local_btn.setEnabled(True)
+        if self.generate_from_staged_btn:
+            self.generate_from_staged_btn.setEnabled(True)
+            self.generate_from_staged_btn.setText("Generate Commit from Staged")
 
     def closeEvent(self, event):
-        """Ensure background threads are stopped before closing."""
         QThreadPool.globalInstance().waitForDone()
         event.accept()
 
