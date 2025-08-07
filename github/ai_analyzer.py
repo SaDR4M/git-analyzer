@@ -157,3 +157,41 @@ def write_commit_base_on_diff(old_code:str , new_code:str) :
     response = generate_ai_response(prompt=prompt)
     
     return response
+
+
+def write_commits_for_staged_changes(staged_changes:list[dict]) -> str :
+    """Write commit message for user's staged changes"""
+    
+    if not staged_changes :
+        raise ValueError("Staged changes must be enetered")
+    
+    prompt = f"""You are an expert software developer and an expert at writing concise, high-quality Git commit messages. Your task is to analyze a set of code changes and generate a commit message that follows the Conventional Commits specification.
+
+    ## CONTEXT
+    The provided data contains all the file changes for the commit. The data is a JSON object where each key is a file path and the value is a list containing two strings: the content of the file BEFORE the change, and the content AFTER the change.
+
+    - If a file was newly created, its "before" content will be an empty string.
+    - If a file was deleted, its "after" content will be an empty string.
+
+    ## TASK
+    1.  **Analyze the Diff:** Carefully examine the differences between the "before" and "after" content for all provided files to understand the overall purpose of the changes.
+    2.  **Determine Intent:** Do not just list the changes. Your primary goal is to understand the *reason* for the change. Was it a new feature, a bug fix, a performance improvement, a code refactor, or documentation?
+    3.  **Generate Commit Message:** Write a single, holistic commit message that summarizes the entire set of changes.
+
+    ## OUTPUT FORMAT
+    The message MUST strictly follow the Conventional Commits specification.
+
+    - **Format:** `<type>[optional scope]: <subject>`
+    - The subject line must be 50 characters or less.
+    - `<type>` must be one of: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`, `test`, `perf`.
+    - **Body (Optional):** If needed, provide a more detailed explanation of the changes after a single blank line. Explain the "why" behind the change, not the "how".
+    - **Footer (Optional):** Use for breaking changes (`BREAKING CHANGE: ...`) or referencing issue numbers.
+
+    ## CODE CHANGES
+    ```json
+    {staged_changes}
+    """
+    
+    result = generate_ai_response(prompt=prompt)
+    
+    return result
