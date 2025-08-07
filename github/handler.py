@@ -11,7 +11,7 @@ from decouple import config
 from icecream import ic
 from typing import Optional , Literal , Iterator , Tuple
 from dataclasses import dataclass
-from git import Repo
+from git import Repo , InvalidGitRepositoryError
 # local
 from github.urls import (
     GITHUB_COMMIT_URL,
@@ -218,8 +218,10 @@ class GithubCommit:
         
 @dataclass
 class GitRepo:
+    _repo : Repo = None
     staged_files : list = None
     staged_files_repo : list = None
+    file_blobs : list[dict] = None
         
     def _repo(self , path:str) -> list:
         """
@@ -232,15 +234,23 @@ class GitRepo:
         
         directory_exists = self._directory_exist(path)
         if directory_exists :
-            repo = Repo(path)
-            self._stage_changes(repo)
+            
+            try :
+                repo = Repo(path)
+                self._repo = repo
+            except InvalidGitRepositoryError :
+                return "Selected repo isn't valid"
+            
+            self._get_stage_changes(repo)
         else :           
             return "Invalid directory path"
-        # get the staged files data
-        return self._stage_files(repo)
+        
+        # get the staged and unstaged files data
+        return self._get_stage_files(repo) , self._get_unstaged_files(repo)
+
         
     def _directory_exist(self , path:str) -> bool:
-        """Check that path exists or not """
+        """Check that path exists or not"""
 
         path_exists = os.path.exists(path=path)
 
@@ -248,7 +258,7 @@ class GitRepo:
             return False
         return True
             
-    def _stage_files(self , repo:Repo) -> list :
+    def _get_stage_files(self , repo:Repo) -> list :
         """get the file name of staged changes with the change type"""
         # staged diff
         staged_changes = repo.index.diff(repo.head.commit)
@@ -266,7 +276,7 @@ class GitRepo:
         self._stage_files = files
         return files
     
-    def _stage_changes(self , repo:Repo) -> list[Repo]:
+    def _get_stage_changes(self , repo:Repo) -> list[Repo]:
         """Get the stage changes to write commit base on them"""
     
         # get staged changes diff
@@ -279,17 +289,77 @@ class GitRepo:
 
         self._staged_files_repo = stage_files
 
+    def _get_unstaged_files(self , repo:Repo) -> list | None:
+        """Get unstaged files list"""
+        # get unstaged files
+        untracked_changes = repo.index.diff(None)
+        
+        if untracked_files :
+            untracked_files = [file.a_path for file in untracked_changes]
+        else :
+            return None
 
-    def decode_blob(self , repo:Repo) -> Tuple[str , str] :
+        return untracked_files
+    
+    def _add_to_stage(self , repo:Repo , file_name:str ) -> None:
+        """Add file to staged changes"""
+        
+        if not file_name :
+            raise ValueError("File name is not valid")
+        
+        repo.index.add(file_name)
+        
+    
+    def _add_all_to_stage(self , repo:Repo) -> None :
+        """Stage all files"""
+        
+        repo.index.add(all=True)
+        
+    def _remove_from_stage(self , repo:Repo , file_name:str) -> None :
+        """Remove the file from staged changes"""
+                
+        if not file_name :
+            raise ValueError("File name is not valid")
+        
+        repo.index.remove(file_name)
+    
+    def _remove_all_from_stage(self , repo:Repo) -> None :
+        """Remove all messages from staged changes"""
+        
+        if not repo :
+            raise ValueError("Repo must be entered")
+        
+        repo.index.remove(all=True)
+    
+    
+    def decode_blob(self , diff:object) -> Tuple[str , str] :
         """Decode a & b blobs to strings"""    
-        if repo.a_blob and not repo.b_blob :
+        if diff.a_blob and not diff.b_blob :
             raise ValueError("a_blob or b_blob must have value")
         
-        decoded_b_blob = self.b_blob.data_stream.read().decode('utf-8')
-        decoded_a_blob = self.a_blob.data_stream.read().decode('utf-8')
+        # for deleted files the b_blob will be None
+        decoded_b_blob = diff.b_blob.data_stream.read().decode('utf-8') if diff.b_blob else "Deleted"            
+        
+        # for new files the a_blob will be None
+        decoded_a_blob = diff.a_blob.data_stream.read().decode('utf-8') if diff.a_blob else "New added"
         
         return decoded_a_blob , decoded_b_blob
     
 
-    
+    def _combine_all_blobs(self) -> list[dict] :
+        """Combine all diffs to analyze the staged changes commits"""
+        
+        combined_diffs = []
+        for diff in self._staged_files_repo :
+            # for new files a_path will be None
+            # we set file path to b_path it's more reliable to do
+            file_path = diff.b_path or diff.a_path
+            if not file_path :
+                raise ValueError("File path cannot be empty")
+            
+            old_content , new_content = self.decode_blob(diff)
+            # combine it
+            combined_diffs[file_path] = [old_content , new_content]
+        print(combined_diffs)
+        return combined_diffs
     
