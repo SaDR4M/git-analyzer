@@ -33,6 +33,7 @@ from PyQt6.QtGui import QIcon, QPixmap, QFontDatabase, QTextCursor
 
 # --- Import the actual logic handlers ---
 try:
+    # Assuming these are in a 'github' directory relative to the script
     from github.handler import GithubProfile, GithubRepo, GithubCommit
     from github.ai_analyzer import analyze_commit_list_with_ai, commit_best_practice, write_commit_message, write_commit_base_on_diff, write_commits_for_staged_changes
 except ImportError:
@@ -76,83 +77,126 @@ except ImportError:
         return f"feat: Update {num_files} files\n\n- Refactored core logic for performance.\n- Updated documentation and tests."
 
 
-# --- Real GitRepo Class ---
+# --- User-Provided GitRepo Class ---
+@dataclass
 class GitRepo:
-    """Handles all local Git repository interactions."""
-    def __init__(self):
-        self.staged_diffs = []
+    _repo : Repo = None
+    staged_files : list = None
+    staged_files_repo : list = None
+    file_blobs : list[dict] = None
+        
+    def _repo_init(self , path:str) -> Tuple[list, list]:
+        """
+        Initializes the repo object and fetches the initial status.
+        """
+        if not path:
+            raise ValueError("Path must be valid")
+        
+        if not self._directory_exist(path):
+            raise FileNotFoundError("Invalid directory path")
+            
+        try:
+            self._repo = Repo(path, search_parent_directories=True)
+        except InvalidGitRepositoryError:
+            raise InvalidGitRepositoryError("Selected folder isn't a valid Git repository")
+        
+        self._get_stage_changes()
+        
+        staged = self._get_stage_files()
+        unstaged = self._get_unstaged_files()
+        return staged, unstaged
 
-    def _decode_blob(self, diff):
-        """Safely decodes blob content to string."""
+    def _directory_exist(self , path:str) -> bool:
+        """Check that path exists or not"""
+        return os.path.exists(path)
+            
+    def _get_stage_files(self) -> list:
+        """get the file name of staged changes with the change type"""
+        staged_changes = self._repo.index.diff(self._repo.head.commit)
+        files = []
+        for diff in staged_changes:
+            files.append({
+                "file_name" : diff.b_path or diff.a_path,
+                "change_type" : diff.change_type
+            })
+        self.staged_files = files
+        return files
+    
+    def _get_stage_changes(self):
+        """Get the stage changes to write commit base on them"""
+        self.staged_files_repo = list(self._repo.index.diff(self._repo.head.commit))
+
+    def _get_unstaged_files(self) -> list:
+        """Get unstaged files list"""
+        unstaged_changes = []
+        for diff in self._repo.index.diff(None):
+            unstaged_changes.append({"file_name": diff.b_path or diff.a_path, "change_type": diff.change_type})
+        
+        for file_path in self._repo.untracked_files:
+            if not any(f['file_name'] == file_path for f in unstaged_changes):
+                unstaged_changes.append({"file_name": file_path, "change_type": "A"})
+        return unstaged_changes
+    
+    def _add_to_stage(self, file_name:str):
+        """Add file to staged changes"""
+        if not file_name:
+            raise ValueError("File name is not valid")
+        self._repo.index.add([file_name])
+        return True
+        
+    def _add_all_to_stage(self) -> None:
+        """Stage all files"""
+        # GitPython's add with `all=True` is not what we want.
+        # We need to add all tracked but modified files, and all untracked files.
+        unstaged = self._get_unstaged_files()
+        files_to_add = [item['file_name'] for item in unstaged]
+        if files_to_add:
+            self._repo.index.add(files_to_add)
+        return True
+        
+    def _remove_from_stage(self, file_name:str) -> None:
+        """Remove the file from staged changes"""
+        if not file_name:
+            raise ValueError("File name is not valid")
+        self._repo.index.reset(paths=[file_name])
+        return True
+    
+    def _remove_all_from_stage(self) -> None:
+        """Remove all messages from staged changes"""
+        if not self._repo:
+            raise ValueError("Repo must be initialized")
+        self._repo.index.reset()
+        return True
+    
+    def decode_blob(self, diff:object) -> Tuple[str, str]:
+        """Decode a & b blobs to strings"""
+        old_content = ""
+        new_content = ""
         try:
-            old_content = diff.a_blob.data_stream.read().decode('utf-8')
-        except (AttributeError, UnicodeDecodeError):
-            old_content = "" # File is new or is binary
+            old_content = diff.a_blob.data_stream.read().decode('utf-8', 'ignore') if diff.a_blob else "New added"
+        except Exception: pass
         try:
-            new_content = diff.b_blob.data_stream.read().decode('utf-8')
-        except (AttributeError, UnicodeDecodeError):
-            new_content = "" # File was deleted or is binary
+            new_content = diff.b_blob.data_stream.read().decode('utf-8', 'ignore') if diff.b_blob else "Deleted"
+        except Exception: pass
         return old_content, new_content
 
-    def get_status(self, path: str) -> Dict[str, List[Dict[str, str]]]:
-        """
-        Gets the status of the local repository, separating staged and unstaged files.
-        Also caches the staged diff objects for later use.
-        """
-        if not os.path.isdir(path):
-            raise ValueError("Invalid directory path provided.")
-        
-        try:
-            repo = Repo(path, search_parent_directories=True)
-        except InvalidGitRepositoryError:
-            raise InvalidGitRepositoryError("The selected folder is not a valid Git repository.")
-
-        self.staged_diffs = list(repo.index.diff(repo.head.commit))
-        
-        staged_files = []
-        for diff in self.staged_diffs:
-            staged_files.append({"file_name": diff.a_path, "change_type": diff.change_type})
-
-        unstaged_files = []
-        for diff in repo.index.diff(None):
-            unstaged_files.append({"file_name": diff.a_path, "change_type": diff.change_type})
-        
-        untracked = repo.untracked_files
-        for file_path in untracked:
-            if not any(f['file_name'] == file_path for f in unstaged_files):
-                unstaged_files.append({"file_name": file_path, "change_type": "A"})
-
-        return {"staged": staged_files, "unstaged": unstaged_files}
-
-    def combine_all_blobs(self) -> dict:
+    def _combine_all_blobs(self) -> dict:
         """Combine all diffs to analyze the staged changes commits"""
         combined_diffs = {}
-        for diff in self.staged_diffs:
+        for diff in self.staged_files_repo:
             file_path = diff.b_path or diff.a_path
             if not file_path:
-                continue # Should not happen, but good practice
+                continue
             
-            old_content, new_content = self._decode_blob(diff)
+            old_content, new_content = self.decode_blob(diff)
             combined_diffs[file_path] = {"old": old_content, "new": new_content}
-    
         return combined_diffs
 
-    def stage_files(self, path: str, files_to_stage: List[str]):
-        """Stages a list of files in the given repository."""
-        repo = Repo(path, search_parent_directories=True)
-        repo.index.add(files_to_stage)
-        return True
-
-    def unstage_files(self, path: str, files_to_unstage: List[str]):
-        """Unstages a list of files in the given repository."""
-        repo = Repo(path, search_parent_directories=True)
-        repo.index.reset(paths=files_to_unstage)
-        return True
-        
-    def unstage_all_files(self, path: str):
-        """Unstages all files in the repository."""
-        repo = Repo(path, search_parent_directories=True)
-        repo.index.reset()
+    def _commit(self, message: str) -> bool:
+        """Commits the staged changes with the given message."""
+        if not message:
+            raise ValueError("Commit message cannot be empty.")
+        self._repo.index.commit(message)
         return True
 
 # --- Custom Widget for Plain Text Pasting ---
@@ -206,6 +250,7 @@ class GitAnalyzerGUI(QMainWindow):
         self.staged_files_list = None
         self.refresh_local_btn = None
         self.generate_from_staged_btn = None
+        self.commit_staged_btn = None
         self.generated_staged_commit_text = None
 
         self.init_ui()
@@ -501,7 +546,6 @@ class GitAnalyzerGUI(QMainWindow):
 
         local_group_layout.addLayout(file_management_layout)
         
-        # --- AI Commit Generation for Staged Files ---
         staged_commit_group = QGroupBox("AI Commit Generation for Staged Changes")
         staged_commit_layout = QVBoxLayout(staged_commit_group)
         staged_commit_layout.setContentsMargins(20, 30, 20, 20)
@@ -511,12 +555,21 @@ class GitAnalyzerGUI(QMainWindow):
         self.generated_staged_commit_text.setReadOnly(True)
         self.generated_staged_commit_text.setPlaceholderText("AI-generated commit message for all staged changes will appear here...")
         
+        action_buttons_layout = QHBoxLayout()
         self.generate_from_staged_btn = QPushButton("Generate Commit from Staged")
-        self.generate_from_staged_btn.setObjectName("generate_from_diff_btn") # Re-use style
+        self.generate_from_staged_btn.setObjectName("generate_from_diff_btn")
         self.generate_from_staged_btn.clicked.connect(self.run_staged_changes_analysis)
+        
+        self.commit_staged_btn = QPushButton("Commit")
+        self.commit_staged_btn.setObjectName("commitButton")
+        self.commit_staged_btn.clicked.connect(self.handle_commit_staged)
+        self.commit_staged_btn.setEnabled(False)
+
+        action_buttons_layout.addWidget(self.generate_from_staged_btn)
+        action_buttons_layout.addWidget(self.commit_staged_btn)
 
         staged_commit_layout.addWidget(self.generated_staged_commit_text)
-        staged_commit_layout.addWidget(self.generate_from_staged_btn)
+        staged_commit_layout.addLayout(action_buttons_layout)
         
         local_group_layout.addWidget(staged_commit_group)
 
@@ -604,6 +657,13 @@ class GitAnalyzerGUI(QMainWindow):
             }
             QPushButton#iconButton:hover {
                 background-color: #374151;
+            }
+            QPushButton#commitButton {
+                background-color: #16A34A; /* Green */
+                color: #F9FAFB;
+            }
+            QPushButton#commitButton:hover {
+                background-color: #22C55E;
             }
             QStatusBar {
                 background-color: #1F2937; border-top: 1px solid #374151;
@@ -868,7 +928,7 @@ class GitAnalyzerGUI(QMainWindow):
             return
         self.status_bar.showMessage("Refreshing local changes...", 2000)
         self.refresh_local_btn.setEnabled(False)
-        self.run_task_in_thread(self.local_git_repo.get_status, self._on_get_local_changes_result, self._on_task_error, path=self.current_project_path)
+        self.run_task_in_thread(self.local_git_repo._repo_init, self._on_get_local_changes_result, self._on_task_error, path=self.current_project_path)
 
     def handle_stage_selected(self):
         selected_items = self.unstaged_files_list.selectedItems()
@@ -876,28 +936,13 @@ class GitAnalyzerGUI(QMainWindow):
             QMessageBox.information(self, "No Selection", "Please select a file to stage.")
             return
         file_to_stage = selected_items[0].text().split('\t')[-1]
-        self.run_stage_task([file_to_stage])
+        self.run_task_in_thread(self.local_git_repo._add_to_stage, self._on_stage_complete, self._on_task_error, file_name=file_to_stage)
 
     def handle_stage_all(self):
-        all_files = []
-        for i in range(self.unstaged_files_list.count()):
-            item_text = self.unstaged_files_list.item(i).text()
-            if "No unstaged changes" not in item_text:
-                 all_files.append(item_text.split('\t')[-1])
-        if not all_files:
+        if self.unstaged_files_list.count() == 0 or "No unstaged changes" in self.unstaged_files_list.item(0).text():
             QMessageBox.information(self, "No Changes", "There are no unstaged files to stage.")
             return
-        self.run_stage_task(all_files)
-
-    def run_stage_task(self, files: List[str]):
-        self.status_bar.showMessage(f"Staging {len(files)} file(s)...", 3000)
-        self.run_task_in_thread(
-            self.local_git_repo.stage_files,
-            self._on_stage_complete,
-            self._on_task_error,
-            path=self.current_project_path,
-            files_to_stage=files
-        )
+        self.run_task_in_thread(self.local_git_repo._add_all_to_stage, self._on_stage_complete, self._on_task_error)
 
     def _on_stage_complete(self, result):
         self.status_bar.showMessage("Staging successful!", 2000)
@@ -909,51 +954,38 @@ class GitAnalyzerGUI(QMainWindow):
             QMessageBox.information(self, "No Selection", "Please select a file to unstage.")
             return
         file_to_unstage = selected_items[0].text().split('\t')[-1]
-        self.run_unstage_task([file_to_unstage])
+        self.run_task_in_thread(self.local_git_repo._remove_from_stage, self._on_unstage_complete, self._on_task_error, file_name=file_to_unstage)
 
     def handle_unstage_all(self):
         if self.staged_files_list.count() == 0 or "No staged changes" in self.staged_files_list.item(0).text():
             QMessageBox.information(self, "No Changes", "There are no staged files to unstage.")
             return
-        
-        self.status_bar.showMessage("Unstaging all files...", 3000)
-        self.run_task_in_thread(
-            self.local_git_repo.unstage_all_files,
-            self._on_unstage_complete,
-            self._on_task_error,
-            path=self.current_project_path
-        )
-
-    def run_unstage_task(self, files: List[str]):
-        self.status_bar.showMessage(f"Unstaging {len(files)} file(s)...", 3000)
-        self.run_task_in_thread(
-            self.local_git_repo.unstage_files,
-            self._on_unstage_complete,
-            self._on_task_error,
-            path=self.current_project_path,
-            files_to_unstage=files
-        )
+        self.run_task_in_thread(self.local_git_repo._remove_all_from_stage, self._on_unstage_complete, self._on_task_error)
 
     def _on_unstage_complete(self, result):
         self.status_bar.showMessage("Unstaging successful!", 2000)
         self.refresh_local_repo_view()
 
     def run_staged_changes_analysis(self):
-        """Handles the full workflow for generating a commit from staged files."""
-        if not self.local_git_repo.staged_diffs:
+        if not self.local_git_repo.staged_files_repo:
             QMessageBox.information(self, "No Staged Changes", "There are no changes in the staging area to analyze.")
             return
         
         self.generate_from_staged_btn.setEnabled(False)
         self.generate_from_staged_btn.setText("Analyzing...")
+        self.commit_staged_btn.setEnabled(False)
         self.run_task_in_thread(self._task_generate_from_staged, self._on_staged_analysis_result, self._on_task_error)
 
     def _task_generate_from_staged(self):
-        """Background task to combine blobs and call the AI."""
-        combined_blobs = self.local_git_repo.combine_all_blobs()
+        combined_blobs = self.local_git_repo._combine_all_blobs()
         if not combined_blobs:
             raise ValueError("Could not extract changes from staged files.")
         
+        print("--- Combined Diffs for AI ---")
+        import json
+        print(json.dumps(combined_blobs, indent=2))
+        print("-----------------------------")
+
         commit_message = write_commits_for_staged_changes(combined_blobs)
         return commit_message
 
@@ -961,13 +993,43 @@ class GitAnalyzerGUI(QMainWindow):
         self.generated_staged_commit_text.setText(result)
         self.generate_from_staged_btn.setEnabled(True)
         self.generate_from_staged_btn.setText("Generate Commit from Staged")
+        self.commit_staged_btn.setEnabled(True)
 
-    def _on_get_local_changes_result(self, result: Dict[str, list]):
+    def handle_commit_staged(self):
+        commit_message = self.generated_staged_commit_text.toPlainText().strip()
+        if not commit_message:
+            QMessageBox.warning(self, "No Message", "Cannot commit with an empty message. Please generate a message first.")
+            return
+        
+        self.commit_staged_btn.setEnabled(False)
+        self.commit_staged_btn.setText("Committing...")
+        self.run_task_in_thread(
+            self.local_git_repo._commit,
+            self._on_commit_complete,
+            self._on_task_error,
+            message=commit_message
+        )
+
+    def _on_commit_complete(self, result):
+        if result:
+            QMessageBox.information(self, "Success", "Commit was created successfully.")
+            self.generated_staged_commit_text.clear()
+            self.commit_staged_btn.setEnabled(False)
+            self.commit_staged_btn.setText("Commit")
+            self.refresh_local_repo_view()
+        else:
+            QMessageBox.critical(self, "Failure", "The commit operation failed.")
+            self.commit_staged_btn.setEnabled(True)
+            self.commit_staged_btn.setText("Commit")
+
+    def _on_get_local_changes_result(self, result: Tuple[list, list]):
+        staged_files, unstaged_files = result
         self.refresh_local_btn.setEnabled(True)
         self.staged_files_list.clear()
         self.unstaged_files_list.clear()
+        self.generated_staged_commit_text.clear()
+        self.commit_staged_btn.setEnabled(False)
 
-        staged_files = result.get("staged", [])
         if staged_files:
             for file_info in staged_files:
                 display_text = f"{file_info['change_type']}\t{file_info['file_name']}"
@@ -975,7 +1037,6 @@ class GitAnalyzerGUI(QMainWindow):
         else:
             self.staged_files_list.addItem("No staged changes.")
 
-        unstaged_files = result.get("unstaged", [])
         if unstaged_files:
             for file_info in unstaged_files:
                 display_text = f"{file_info['change_type']}\t{file_info['file_name']}"
@@ -1003,6 +1064,9 @@ class GitAnalyzerGUI(QMainWindow):
         if self.generate_from_staged_btn:
             self.generate_from_staged_btn.setEnabled(True)
             self.generate_from_staged_btn.setText("Generate Commit from Staged")
+        if self.commit_staged_btn:
+            self.commit_staged_btn.setEnabled(self.generated_staged_commit_text.toPlainText() != "")
+            self.commit_staged_btn.setText("Commit")
 
     def closeEvent(self, event):
         QThreadPool.globalInstance().waitForDone()

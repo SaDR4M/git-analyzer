@@ -360,6 +360,15 @@ class GitRepo:
             old_content , new_content = self.decode_blob(diff)
             # combine it
             combined_diffs[file_path] = [old_content , new_content]
-        print(combined_diffs)
+            
         return combined_diffs
     
+    def _commit(self , message:str) -> bool :
+        """Commit generated commit message by AI for staged changes"""
+        
+        if not message :
+            return False
+        
+        self._repo.index.commit(message)
+        
+        return True

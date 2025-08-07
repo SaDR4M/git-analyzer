@@ -191,7 +191,7 @@ def write_commits_for_staged_changes(staged_changes:list[dict]) -> str :
     ```json
     {staged_changes}
     """
-    
+    print(prompt)
     result = generate_ai_response(prompt=prompt)
     
     return result
